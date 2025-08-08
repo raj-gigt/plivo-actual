@@ -10,6 +10,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.schema import HumanMessage
 import logging
 from functools import wraps
+from document_processor import DocumentProcessor
 
 # Load environment variables
 load_dotenv()
@@ -31,8 +32,9 @@ if not GOOGLE_API_KEY:
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# Initialize the model
+# Initialize the model and document processor
 model = genai.GenerativeModel('gemini-2.0-flash-exp')
+document_processor = DocumentProcessor()
 
 # Dummy user credentials (in production, use a database)
 DUMMY_USERS = {
@@ -93,6 +95,48 @@ def analyze_image(image_data):
         return {
             'success': False,
             'error': f"Failed to analyze image: {str(e)}"
+        }
+
+def analyze_document(document_content, source_type):
+    """
+    Analyze document content using Gemini 2.0 Flash and return a comprehensive summary
+    """
+    try:
+        # Prepare the prompt for document analysis
+        prompt = f"""
+        Please provide a comprehensive analysis and summary of the following {source_type} document. Include:
+
+        1. **Executive Summary**: A concise overview of the main points and key findings
+        2. **Key Topics**: Identify and list the main topics, themes, or sections covered
+        3. **Important Details**: Highlight critical information, data, or insights
+        4. **Structure Analysis**: Describe the document's organization and flow
+        5. **Key Takeaways**: Summarize the most important conclusions or recommendations
+        6. **Context and Purpose**: Analyze the document's intended audience and purpose
+        7. **Notable Quotes**: Include any significant quotes or statements (if applicable)
+        8. **Action Items**: Identify any actionable items, recommendations, or next steps
+
+        Document Content:
+        {document_content}
+
+        Please provide a well-structured, professional analysis that captures the essence and key points of this document.
+        """
+        
+        # Generate response using Gemini
+        response = model.generate_content(prompt)
+        
+        return {
+            'success': True,
+            'summary': response.text,
+            'model_used': 'Gemini 2.0 Flash',
+            'source_type': source_type,
+            'content_length': len(document_content)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error analyzing document: {str(e)}")
+        return {
+            'success': False,
+            'error': f"Failed to analyze document: {str(e)}"
         }
 
 @app.route('/api/login', methods=['POST'])
@@ -175,23 +219,45 @@ def check_auth():
 def analyze_image_endpoint():
     """
     Endpoint to analyze uploaded images (requires authentication)
+    Supports both file upload and base64 JSON data
     """
     try:
-        data = request.get_json()
-        
-        if not data or 'image' not in data:
+        # Handle file upload (FormData)
+        if 'image' in request.files:
+            file = request.files['image']
+            if file.filename == '':
+                return jsonify({
+                    'success': False,
+                    'error': 'No image file selected'
+                }), 400
+            
+            # Convert file to base64 for processing
+            file_content = file.read()
+            image_base64 = base64.b64encode(file_content).decode('utf-8')
+            image_data = f"data:image/{file.content_type};base64,{image_base64}"
+            
+        # Handle JSON data (base64)
+        elif request.is_json:
+            data = request.get_json()
+            
+            if not data or 'image' not in data:
+                return jsonify({
+                    'success': False,
+                    'error': 'No image data provided'
+                }), 400
+            
+            image_data = data['image']
+            
+            # Validate image data format
+            if not image_data.startswith('data:image/'):
+                return jsonify({
+                    'success': False,
+                    'error': 'Invalid image format. Please provide a base64 encoded image.'
+                }), 400
+        else:
             return jsonify({
                 'success': False,
-                'error': 'No image data provided'
-            }), 400
-        
-        image_data = data['image']
-        
-        # Validate image data format
-        if not image_data.startswith('data:image/'):
-            return jsonify({
-                'success': False,
-                'error': 'Invalid image format. Please provide a base64 encoded image.'
+                'error': 'Invalid request format. Please provide a file upload or JSON data.'
             }), 400
         
         # Analyze the image
@@ -209,6 +275,65 @@ def analyze_image_endpoint():
             'error': f'Server error: {str(e)}'
         }), 500
 
+@app.route('/api/analyze-document', methods=['POST'])
+@login_required
+def analyze_document_endpoint():
+    """
+    Endpoint to analyze documents (requires authentication)
+    Supports file upload, URL, and direct text input
+    """
+    try:
+        # Handle file upload
+        if 'file' in request.files:
+            file = request.files['file']
+            if file.filename == '':
+                return jsonify({
+                    'success': False,
+                    'error': 'No file selected'
+                }), 400
+            
+            # Process uploaded file
+            result = document_processor.process_document({'file': file})
+            
+        # Handle JSON data (URL or text)
+        elif request.is_json:
+            data = request.get_json()
+            
+            if 'url' in data:
+                # Process URL
+                result = document_processor.process_document({'url': data['url']})
+            elif 'text' in data:
+                # Process direct text
+                result = document_processor.process_document({'text': data['text']})
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': 'No document data provided. Please provide a file, URL, or text.'
+                }), 400
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid request format. Please provide a file upload or JSON data.'
+            }), 400
+        
+        if not result['success']:
+            return jsonify(result), 400
+        
+        # Analyze the document content
+        analysis_result = analyze_document(result['content'], result['source_type'])
+        
+        if analysis_result['success']:
+            return jsonify(analysis_result), 200
+        else:
+            return jsonify(analysis_result), 500
+            
+    except Exception as e:
+        logger.error(f"Error in analyze_document_endpoint: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': f'Server error: {str(e)}'
+        }), 500
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """
@@ -216,10 +341,16 @@ def health_check():
     """
     return jsonify({
         'status': 'healthy',
-        'message': 'Image Analysis API is running',
-        'authentication': 'enabled'
+        'message': 'AI Analysis API is running',
+        'authentication': 'enabled',
+        'model': 'Gemini 2.0 Flash',
+        'features': ['image-analysis', 'document-analysis']
     }), 200
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5001))
-    app.run(debug=True, host='0.0.0.0', port=port) 
+    port = int(os.environ.get('PORT', 3000))
+    host = os.environ.get('HOST', '0.0.0.0')
+    debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    
+    logger.info(f"Starting Flask app on {host}:{port}")
+    app.run(debug=debug, host=host, port=port) 
