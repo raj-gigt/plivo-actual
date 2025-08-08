@@ -50,16 +50,6 @@ function App() {
       name: "Document Analysis",
       description: "Analyze PDF, DOC, URLs, and Google Drive documents",
     },
-    {
-      id: "text-analysis",
-      name: "Text Analysis",
-      description: "Analyze text content (coming soon)",
-    },
-    {
-      id: "code-analysis",
-      name: "Code Analysis",
-      description: "Analyze code snippets (coming soon)",
-    },
   ];
 
   // Check authentication status on component mount
